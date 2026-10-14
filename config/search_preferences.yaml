@@ -1,0 +1,19 @@
+# Fill in the values you know. Leave a value blank if you do not want to set it.
+
+city: Enschede
+
+must_meet: 
+  max_monthly_rent_eur: 1900
+  min_size_m2: 70
+
+work:
+  location: Ariënsplein 1-300, 7511 JX Enschede
+  commute_mode: public_transport, bike 
+  max_commute_minutes: 15
+  
+# Higher numbers mean more important when comparing homes that meet the
+# must-meet requirements. These are starter weights; adjust them as you like.
+priorities:
+  commute: 3
+  public_transport: 1 
+  groceries: 2
