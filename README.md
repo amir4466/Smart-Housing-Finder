@@ -1,63 +1,87 @@
 # Smart Housing Agent
 
-Smart Housing Agent is a small local tool for comparing rental homes across
-housing websites. The user starts each search manually. The tool is not intended
-to monitor websites continuously.
+Smart Housing Agent has two goals: build a useful rental-housing finder and
+learn how to integrate AI into software thoughtfully. The project should make
+the model's contribution, benefits, costs, failures, and limits visible. It
+should use an LLM only where language understanding adds value; Python handles
+clear rules and repeatable decisions.
 
-## Intended user flow
+## Intended base workflow
 
-1. The user describes their housing needs in ordinary language.
-2. An LLM (planned: Gemini) proposes structured preferences and a plain-language
-   summary of what it understood. It also identifies questions and ambiguities.
-3. Python validates the proposed fields. It does not silently discard details it
-   cannot represent: unsupported or ambiguous information is shown for review.
-4. The user confirms or corrects the summary and answers important questions.
-5. The app saves the confirmed preferences to `config/search_preferences.yaml`.
-6. Website-specific connectors fetch and parse listings from permitted sources.
-7. A matching layer evaluates each listing. Python applies clear hard
-   requirements and compares structured fields. The LLM may assess soft,
-   semantic preferences from listing text when useful, with evidence and
-   uncertainty kept visible. Python combines the signals using an explicit,
-   explainable scoring policy. Unknown listing facts remain unknown and do not
-   silently pass a hard requirement that depends on them.
-8. Python stores results locally in SQLite and exports CSV.
+1. The user describes housing needs in ordinary language.
+2. An LLM proposes structured preferences, a summary of its understanding, and
+   questions about missing or ambiguous details.
+3. Python validates the proposal. It reports unsupported or invalid details
+   instead of silently discarding them.
+4. The user reviews the summary, answers questions, and confirms or corrects
+   the proposed preferences.
+5. The app searches permitted housing sources and parses their listings into a
+   shared model.
+6. Python applies explicit hard requirements. A hybrid matching layer can use
+   the LLM to assess soft, semantic preferences from listing evidence, then
+   Python combines the results using an explainable scoring policy.
+7. Results, evidence, and user feedback are saved in local SQLite and can be
+   exported to CSV.
 
-The LLM assists with language understanding and evidence-bound interpretation
-of listing text. Python owns schema validation, hard filtering, score
-combination, persistence, and export. The model must not invent listing facts,
-waive hard requirements, or replace deterministic checks. The result should
-show why each listing matched, including which details came from structured
-source fields and which were model interpreted.
+Unknown listing facts remain unknown. An LLM must not invent listing facts,
+waive hard requirements, or replace deterministic checks. Show why each
+listing matched, including evidence source and uncertainty.
 
-## Fallback behavior
+## Data and storage direction
 
-- If the LLM is unavailable or its response is invalid, do not change the saved
-  preferences. Let the user retry, answer structured prompts, or edit YAML.
-- If a preference is ambiguous, retain it as unresolved and ask the user. Do not
-  guess, silently omit it, or apply it as a filter before clarification.
-- If the user skips a question, save only confirmed fields and leave the rest
-  unset. Skip checks that require missing information.
-- Keep the previous confirmed YAML intact until the user approves a replacement.
+Python uses nested objects while a search is running. SQLite is the durable
+source of truth for current confirmed profiles as well as their revisions,
+search runs, listing results, feedback, and history. On startup, the app loads
+records into Python objects and saves changes back to SQLite.
 
-## Input caching
+Preserve these as separate linked data: the original user wording, the model's
+summary and proposed structure, user clarifications or corrections, and the
+confirmed preferences used for a search. YAML is optional for import/export or
+as a starter template; it is not the live source of truth. The existing YAML
+loader and sample file are legacy parts to review during the persistence work.
 
-Caching confirmed natural-language inputs and their structured interpretations
-is a planned optimization to reduce repeated LLM token usage. It is not
-implemented yet. Cache behavior must account for paraphrases, stale schemas or
-prompts, and personal information such as work addresses. Cached interpretations
-must still be reviewable; users need a way to clear cached data. See
-[`docs/design.md`](docs/design.md) for the proposed cache boundary.
+## Learning and efficiency
+
+Start with a small deterministic baseline, then add LLM behavior so the same
+examples can be compared. Record API-reported input/output tokens, cached
+tokens when available, latency, errors, and cache hits. Measure Python process
+memory and local database growth where relevant. A hosted model's internal GPU
+memory is generally not exposed by its API.
+
+Application-level caching of confirmed input interpretations is a planned
+optimization. It is distinct from provider context caching. Start with exact
+repeat lookup, include model/prompt/schema versions, keep cached results
+reviewable, and define privacy and deletion behavior. Do not add an LLM call
+where deterministic code is sufficient.
+
+## Later monitoring layer
+
+Continuous monitoring is a future layer, added after the base search works for
+one permitted source. It should use the confirmed preferences and
+user-approved feedback on chosen listings, detect new or changed listings, and
+send a link when a relevant update is found. Listing choices may suggest changes
+to soft preferences, but must not silently change hard requirements.
+
+Monitoring while the user's computer is off requires a hosted worker and
+persistent hosted storage; that introduces separate deployment, privacy, and
+cost decisions. Google is the preferred ecosystem to investigate. A Google AI
+Plus consumer subscription does not by itself confirm Gemini API billing,
+quotas, or Google Cloud hosting access. Verify each developer service and its
+costs when that integration becomes a task. Gmail inbox-change notifications
+and outbound email notifications are separate integrations.
 
 ## Current implementation
 
-The current code is an early skeleton. `models.py` defines basic listing,
-preference, and match dataclasses. `settings.py` loads and validates a YAML
-preferences file. The app coordinator, Gemini integration, connectors, scoring,
-geocoding, SQLite storage, and CSV export modules are placeholders and are not
-implemented yet. The target flow above describes intended behavior, not a
-working end-to-end feature.
+The project is an early skeleton. `models.py` contains listing, preference,
+draft, assessment, and model-usage dataclasses. `settings.py` loads and
+validates the current YAML preferences. The app coordinator, Gemini service,
+connectors, scoring, geocoding, SQLite storage, and CSV export are still
+placeholders; there is no end-to-end search yet. See
+[`docs/design.md`](docs/design.md) for the proposed data relationships and
+incremental plan.
 
-See [`docs/design.md`](docs/design.md) for the proposed preference lifecycle,
-hybrid matching and ranking approach, data boundaries, and incremental
-implementation plan. Scoring weights, confidence thresholds, and the treatment
-of missing data still need agreement before implementation.
+## Development approach
+
+Work one task and one file at a time. Before adding functional code, present the
+proposed code in chat, explain its logic, and let the user review it. Then add
+only the reviewed change to the project.

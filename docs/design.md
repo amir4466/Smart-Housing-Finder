@@ -1,172 +1,236 @@
-# Preference input and interpretation design
+# Smart Housing Agent: current design direction
 
-This document records the agreed direction for the early-stage Smart Housing
-Agent. It describes intended behavior; the Gemini input flow and cache are not
-implemented yet.
+This document records the current intended design and separates it from what is
+already implemented. It is a learning project as well as a housing finder: we
+want to understand how AI helps, where it fails, what it costs, and how it
+compares with ordinary code. Prefer small, measurable integrations over
+unnecessary model calls or infrastructure.
 
-## Preference lifecycle
+## Product goals
 
-Keep the user's request, the model's proposal, and the saved search preferences
-as distinct concepts:
+- Help a user compare rental homes against their needs and see an understandable
+  ranked list.
+- Teach AI integration through visible, incremental experiments.
+- Begin with a manually run local base application. Add continuous monitoring
+  only after the base flow works.
 
-1. **User input:** preserve the original text while processing a request so the
-   user can compare it with the interpretation. Treat it as potentially
-   sensitive, especially if it includes an address.
-2. **LLM proposal:** ask the model for structured fields, a concise confirmation
-   summary, unresolved questions, and any unsupported details. Require a defined
-   schema rather than accepting arbitrary generated YAML.
-3. **Python validation:** validate types, allowed values, numeric ranges, and
-   relationships between fields. Return actionable errors and unresolved items;
-   do not silently drop input that the schema cannot represent.
-4. **User confirmation:** display the interpretation and ask the user to confirm
-   or correct it. Ask focused questions for ambiguity (for example, whether
-   “three rooms” means three rooms total or three bedrooms).
-5. **Persistence:** only after confirmation, serialize the validated structure
-   to YAML. Write a temporary draft and replace the saved file only after the
-   write succeeds, preserving the previous confirmed file on failure.
+## Base workflow
 
-If the user skips an unresolved item, keep it unset and do not use it for a
-filter or score. The app may proceed using other confirmed preferences when
-that is meaningful, while making clear which requested checks could not run.
+1. Capture the user's ordinary-language request.
+2. Ask an LLM to propose structured preferences, summarize its understanding,
+   and list ambiguity or missing details.
+3. Validate the response in Python. Do not silently discard unsupported,
+   invalid, or ambiguous information.
+4. Let the user review and correct the interpretation, answer questions, and
+   confirm the proposed profile.
+5. Fetch listings through permitted, website-specific connectors and parse
+   available facts into a shared listing representation.
+6. Apply explicit hard requirements deterministically. For soft preferences,
+   compare structured listing fields first; use an LLM only where semantic
+   interpretation of listing text adds value.
+7. Combine criteria in Python using an explainable scoring policy. Preserve
+   per-criterion evidence, source, and uncertainty.
+8. Save profile revisions, searches, results, and feedback in local SQLite.
+   Export results to CSV when useful.
 
-## Proposed preference shape
+The LLM can help interpret language; it does not own validation, hard filtering,
+scoring, persistence, or export. Listing facts absent from source data stay
+unknown. Model-extracted details must remain attributed to their text evidence,
+not presented as independently verified facts.
 
-The eventual schema should make these distinctions explicit:
+## Data relationships
 
-- `schema_version` so saved files can be migrated deliberately.
-- `location` for a confirmed city or search area.
-- `household_size` and `property_type` when specified.
-- `hard_requirements` for explicit deal-breakers, such as maximum rent or
-  minimum bedrooms.
-- `preferences` for weighted criteria such as a preferred living room or
-  proximity to shops.
-- Separate `rooms_total` and `bedrooms` fields; never map ambiguous “rooms” to
-  either without clarification.
-- Structured travel needs with destination, mode, and maximum time. A travel
-  time criterion requires a usable destination, a listing location, a travel
-  mode, and a routing source.
-- `unresolved` or `questions` in an in-memory draft. Do not treat these as
-  active search criteria. Confirmed YAML should contain only understood values
-  plus any intentionally retained notes needed to explain what remains unset.
+Use nested Python objects for live execution and relational SQLite records for
+durable data. These are two representations of the same concepts; the app maps
+between them when loading and saving. SQLite is not only an archive: it holds
+the current confirmed profile and current operational state as well as
+historical revisions and search results.
 
-This is a design target, not a migration instruction. Keep the current YAML
-readable until a schema migration is implemented and the user has reviewed the
-meaning of existing values. In particular, the current sample commute mode is
-free text and contains multiple modes; it should not be automatically converted
-to a single mode.
+Conceptual flow:
 
-## LLM and deterministic boundaries
+```text
+User text
+  -> PreferenceDraft
+       -> proposed SearchPreferences
+            -> TravelNeed list
+            -> PreferenceCriterion list
+  -> Python validation and user confirmation
+       -> confirmed SearchPreferences
+  -> matcher compares preferences with each HomeListing
+       -> MatchResult per listing
+            -> CriterionAssessment list
+  -> persistence links the profile revision, search run, listing results,
+     assessments, feedback, and relevant model-call metrics
+```
 
-The LLM may:
+Keep the following information distinct and linked:
 
-- Convert ordinary language into a proposed preference structure.
-- Summarize its interpretation for user confirmation.
-- Identify missing or ambiguous details.
-- Extract candidate facts from listing descriptions that are not consistently
-  represented by the source, such as whether a living room is mentioned. Keep
-  the source text or excerpt as evidence and mark the extraction as model
-  interpreted, not a verified source field.
-- Estimate semantic fit for a confirmed soft preference when simple fields
-  cannot express it (for example, whether a description suggests a bright or
-  quiet home). Return a bounded structured assessment, evidence, and uncertainty
-  rather than an ungrounded overall recommendation.
+- Original user wording.
+- Model summary and proposed structured interpretation.
+- Clarifications and corrections from the user.
+- The confirmed preference revision used for a search.
+- Each search run and the listings observed in that run.
+- Per-criterion match results and evidence.
+- User actions such as save, dismiss, or contact.
+- Model-call measurements that do not duplicate raw prompts.
 
-Python must:
+The current `PreferenceCriterion` has a display `name` but no stable key. Before
+implementing assessment persistence, add a stable criterion key and have
+`CriterionAssessment` refer to it. The `HomeListing` model also needs structured
+facts for criteria such as total rooms, bathrooms, living room, and backyard, or
+an explicit evidence-based way to assess them from listing text.
 
-- Validate the model response against the current schema.
-- Require user review before saving a proposed profile.
-- Apply explicit filters and explainable scoring.
-- Enforce clear hard requirements (such as maximum rent) with deterministic
-  rules. An LLM must not waive or reinterpret these requirements.
-- Combine eligible deterministic and model-assisted soft-preference signals
-  using an explicit scoring policy, and retain per-criterion reasons so the
-  user can see why an option ranked well.
-- Keep facts absent from a listing unknown; never let the LLM fill them in as
-  verified facts. Model-extracted candidate details remain attributed to the
-  description and may be marked unknown or uncertain.
-- Own database writes and CSV export.
+## Proposed SQLite records
 
-## Matching and ranking layer
+Exact table names and columns are still to be reviewed before code is written.
+The initial schema should represent these concepts:
 
-Matching should be hybrid. A language model can be more useful than a fixed
-rule for interpreting flexible descriptions and criteria with varied wording,
-but it can also misread text or overstate what a listing says. It should add
-evidence-bound signals for soft preferences, not replace the deterministic
-checks that are clear and testable.
+- **Profile:** stable identity/name for a reusable search profile.
+- **Preference revision:** original wording, model summary/proposal,
+  clarifications, confirmed preference snapshot, model/prompt/schema versions,
+  and timestamps. A changed profile creates a new revision.
+- **Search run:** one execution linked to the exact preference revision used.
+- **Listing:** source identity and stable listing identity where available.
+- **Search result / listing observation:** what the source reported in that run,
+  along with the result for that run. Keep observations so changed price or
+  availability can be detected later.
+- **Criterion assessment:** one criterion's match level, source, evidence, and
+  uncertainty for a listing result; link by stable criterion key.
+- **User feedback:** actions on a listing, linked to the relevant profile/run.
+- **LLM call metrics:** provider/model/operation, elapsed time, token counts,
+  cached token counts when available, outcome, and error category. Avoid storing
+  secrets or raw prompt text in this metrics record.
+- **Input cache (later):** separate cache records with versioned identity and
+  retention/deletion policy. A cache entry is never the confirmed profile.
 
-For each listing, the matcher should:
+These concepts need not all be implemented in the first database slice. Start
+with the smallest schema that can preserve a preference revision, one search
+run, listing observations/results, and assessments. Add feedback and cache when
+their behavior is ready to implement.
 
-1. Apply explicit hard requirements in Python. If a required fact is missing,
-   represent the result as unknown and ask the chosen policy whether that means
-   “needs review” or “cannot confirm”; do not silently treat missing as a pass.
-2. Compare available normalized listing fields against confirmed preferences.
-3. Where useful, ask the LLM to assess a specific soft criterion from the
-   listing text provided to it. Require a response tied to evidence from that
-   text, with a match level and uncertainty. Do not ask it to invent distances,
-   travel times, room counts, or other facts absent from the source.
-4. Have Python combine scores according to explicit weights and missing-data
+## Matching and ranking
+
+Use a hybrid matcher, and make the source of each judgment visible.
+
+1. Python applies explicit hard requirements. If a required fact is missing,
+   report it as unknown and apply a documented policy such as “needs review” or
+   “cannot confirm”; never silently treat unknown as a pass.
+2. Compare normalized listing fields with confirmed preferences.
+3. Where useful, ask an LLM to assess one soft criterion from provided listing
+   text. Require an evidence excerpt or explanation tied to that text, a bounded
+   match result, and uncertainty. Do not ask it to invent rooms, rent, address,
+   travel times, or other absent facts.
+4. Let Python combine eligible signals with agreed weights and missing-data
    rules. Keep hard-filter outcomes separate from ranking scores.
-5. Show the user the per-criterion result, its source (structured listing field
-   or model interpretation), and any uncertainty.
+5. Show per-criterion reasons, data source, and uncertainty to the user.
 
-The LLM may help with exceptions that are genuinely semantic, but it must not
-be an open-ended exception handler for unclear rules. If the preference itself
-is ambiguous, ask the user. If the listing evidence is insufficient, leave that
-criterion unknown and let the documented missing-data policy handle it. Score
-weights, confidence thresholds, and how unknown soft criteria affect ranking
-remain product decisions to agree before implementation.
+An LLM is not a general-purpose exception handler. Ambiguous user intent needs
+clarification; insufficient listing evidence stays unknown. The weight scale,
+score formula, confidence handling, and treatment of missing soft criteria are
+open design decisions.
 
-## LLM failure paths
+## Learning and efficiency plan
 
-- Missing credentials, network/API failure, or unavailable model: preserve the
-  current confirmed preferences and offer retry, structured CLI questions, or
-  direct YAML editing.
-- Malformed response or schema mismatch: do not save it; report the issue and
-  offer a retry or manual correction.
-- Ambiguity: ask the user rather than guessing. If skipped, leave the value
-  unset and skip dependent checks.
-- User correction: update the proposal, validate again, and request confirmation
-  of the corrected summary before saving.
+Build a small deterministic baseline, then compare it with LLM-assisted
+behavior on the same examples. Keep calls narrow and avoid using a model where
+ordinary code can give the needed result.
 
-The API key belongs in a local secret store or environment configuration, never
-in YAML preferences, source code, or listing exports.
+Record what the provider exposes: input/output tokens, cached-token usage,
+latency, failures, and retries. Measure local Python process memory and SQLite
+size for relevant runs. A hosted model API generally does not expose its
+internal GPU memory use or full internal reasoning state; distinguish those
+unavailable measurements from app-side measurements.
 
-## Input cache requirement (planned)
+The model-usage object is instrumentation data, not memory for the model. The
+local database stores confirmed user/profile history. Provider context caching
+is a separate API feature from the app's own exact-repeat input cache.
 
-Cache user input and its structured interpretation where doing so avoids a
-repeat model call. This is a future requirement, not part of the first LLM
-integration.
+## Input caching (planned)
 
-Design constraints for that cache:
+Cache confirmed input interpretations only when reuse is likely to avoid a
+repeat model call. Start with exact-repeat lookup; similar/paraphrase matching
+can be evaluated later because a near match can change meaning.
 
-- Only reuse a result that the user confirmed. Do not promote an unconfirmed
-  draft into saved preferences through a cache hit.
-- Exact-repeat lookup can be introduced first. Similarity matching is a later
-  choice and must have a conservative threshold; show cached interpretations
-  for review because a near match can change meaning.
-- Include schema and prompt/model version in the cache identity so changed
-  parsing behavior does not silently reuse stale structures.
-- Choose local storage and retention deliberately. Minimize retention of raw
-  input, protect potentially identifying details, and provide a way to clear
-  the cache.
-- A cache hit saves model tokens but does not bypass Python validation or user
-  confirmation.
+- Include model, prompt, and schema versions in cache identity.
+- Revalidate cached structures and show them for review; a cache hit never
+  confirms or changes preferences on the user's behalf.
+- Decide whether to retain raw text, how long to retain it, and how to clear it.
+  Housing needs may include identifying work or home addresses.
+- Compare hit rate, token savings, latency, and incorrect-reuse risk. Provider
+  context caching is useful for substantial repeated context, while a local
+  exact-match cache is likely the first experiment for short preference input.
 
-## Incremental implementation plan
+## Google ecosystem and later monitoring
 
-1. Agree on the preference schema and resolve product questions (city, hard
-   requirements versus preferences, room terminology, and travel needs).
-2. Implement the input-to-proposal-to-confirmation flow with a fake/stub model
-   response first, so validation and correction behavior can be reviewed without
-   API credentials.
-3. Add the Gemini API behind a small service interface, with explicit setup and
-   failure handling.
-4. Save only confirmed, validated preferences to YAML; preserve existing values
-   until a deliberate migration is agreed.
-5. Implement one permitted listing source and a deterministic filter/score
-   vertical slice.
-6. Add SQLite and CSV, then add input caching after the interpretation schema
-   and confirmation lifecycle have stabilized.
+Google is the preferred ecosystem to investigate, not yet a locked-in API or
+hosting design. Google AI Plus is a consumer subscription; it does not by itself
+confirm Gemini Developer API billing, quotas, or Google Cloud runtime access.
+Verify each service, model capability, setup requirement, and cost when that
+integration becomes a task. Gemini Live is for real-time interactive streaming
+and is not required for ordinary text preference parsing or scheduled checks.
 
-Do not add a multi-agent framework, hosted database, frontend, or background
-monitoring without a concrete requirement.
+Continuous listing monitoring is a later layer. It should run only after the
+base search works end to end for one permitted source. It should use the
+confirmed preference revision and approved user feedback, detect new or
+materially changed listings, deduplicate alerts, and send a source link. Listing
+choices may suggest soft-preference changes for approval; never silently change
+hard requirements.
+
+If monitoring must continue while the user's computer is off, it needs a hosted
+worker and persistent hosted storage. That is a separate cost, privacy, and
+operations decision. Local manual refresh is the fallback if hosting is not
+available or wanted. Website alerts or Gmail can be candidate inputs, but
+receiving inbox change notifications and sending outbound email are different
+integrations. Site terms, documented APIs, robots/access rules, login needs, and
+page changes must be checked for every connector.
+
+## Failure and fallback behavior
+
+- **No API key, quota, or service outage:** preserve confirmed preferences;
+  offer a retry or structured/manual entry path.
+- **Malformed or unsupported model response:** show the validation issue and
+  allow correction; do not persist the invalid proposal.
+- **Ambiguous input:** ask a focused question. If skipped, leave the value
+  unknown and skip dependent checks.
+- **Insufficient listing evidence:** mark that criterion unknown and expose it
+  for review.
+- **Source unavailable or access disallowed:** preserve existing results and
+  explain that the source was skipped or monitoring paused.
+- **Duplicate or repeated update:** deduplicate by source identity and listing
+  state before notifying.
+
+Never put passwords, API keys, cookies, or session tokens in source, YAML,
+prompts stored as examples, or listing exports. Use appropriate local secret
+storage or environment configuration.
+
+## Current implementation status
+
+The repository is an early skeleton. `models.py` now contains dataclasses for
+listings, preferences, drafts, criterion assessments, and model-call metrics.
+`settings.py` still loads and validates the existing YAML preference format.
+The app coordinator, Gemini service, connectors, scoring, geocoding, SQLite
+storage, and CSV export are placeholders. No end-to-end search, database
+persistence, input cache, or monitoring is implemented.
+
+The existing `config/search_preferences.yaml` is a sample/legacy profile. Its
+values, including Enschede and the commute settings, are not confirmed as final
+user requirements. Keep it readable until a migration/import role is agreed.
+
+## Step-by-step development process
+
+1. Review the Python data model and agree on stable preference/criterion keys.
+2. Agree on the SQLite concepts and relationships before writing persistence
+   code.
+3. Present each functional file's proposed code in chat, explain the flow and
+   logic, and let the user review it before adding that one file to the project.
+4. Map dataclasses to SQLite records and implement the preference draft,
+   validation, confirmation, and persistence flow.
+5. Add a stub model response, then integrate Gemini and inspect usage and
+   failure behavior.
+6. Compare deterministic matching with LLM-assisted soft matching.
+7. Complete one permitted source vertical slice, then add CSV export.
+8. Evaluate continuous monitoring and hosting as a separate later task.
+
+Do not rebuild working files wholesale or add an agent framework, frontend,
+hosted database, or background monitoring before a concrete learning or product
+need is agreed.
