@@ -5,7 +5,7 @@ from typing import Any, Dict, Optional
 
 import yaml
 
-from .models import SearchPreferences
+from .models import PreferenceCriterion, SearchPreferences
 
 
 DEFAULT_PREFERENCES_PATH = (
@@ -40,7 +40,7 @@ def _optional_number(value: Any, name: str) -> Optional[float]:
 def load_preferences(
     path: str | Path = DEFAULT_PREFERENCES_PATH,
 ) -> SearchPreferences:
-    """Read and validate the user's search preferences."""
+    """Read, validate, and structure the user's YAML preferences."""
     preferences_path = Path(path)
 
     try:
@@ -109,6 +109,30 @@ def load_preferences(
             "Add 'work.location' because commute has a priority above zero."
         )
 
+    # These values are explicitly listed under YAML's must_meet section,
+    # so they become hard criteria. A missing value creates no criterion.
+    preference_criteria = []
+
+    if max_rent is not None:
+        preference_criteria.append(
+            PreferenceCriterion(
+                criterion_key="max_monthly_rent_eur",
+                display_name="Maximum monthly rent",
+                criterion_type="hard",
+                target=max_rent,
+            )
+        )
+
+    if min_size is not None:
+        preference_criteria.append(
+            PreferenceCriterion(
+                criterion_key="min_size_m2",
+                display_name="Minimum home size",
+                criterion_type="hard",
+                target=min_size,
+            )
+        )
+
     return SearchPreferences(
         city=city.strip(),
         max_monthly_rent_eur=max_rent,
@@ -117,4 +141,5 @@ def load_preferences(
         commute_mode=commute_mode.strip(),
         max_commute_minutes=max_commute,
         priorities=priority_values,
+        preference_criteria=preference_criteria,
     )
